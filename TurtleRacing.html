@@ -1,0 +1,559 @@
+<!-- (C) 2025 Bismaya Jyoti Dalei All rights reserved. -->
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🐢 Turtle Racing Championship 🏆</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://pyscript.net/releases/2025.8.1/core.css" />
+  <script type="module" src="https://pyscript.net/releases/2025.8.1/core.js"></script>
+  <link rel="stylesheet" href="myStyle.css" />
+</head>
+<body>
+  <header>
+    <h1>🐢 TURTLE RACING CHAMPIONSHIP 🏆</h1>
+  </header>
+
+  <div class="wrap panel">
+    <div id="stage-card">
+      <canvas id="race-canvas" width="1280" height="720"></canvas>
+    </div>
+
+    <aside id="ui-card">
+      <div class="controls">
+        <div class="row">
+          <div>
+            <label for="bet">Your bet</label>
+            <select id="bet"></select>
+          </div>
+          <div>
+            <label for="mode">Mode</label>
+            <select id="mode">
+              <option value="fair">Fair</option>
+              <option value="chaos">Chaos</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="difficulty">Chaos level</label>
+            <input type="range" id="difficulty" min="0" max="100" value="45" />
+          </div>
+          <div>
+            <label for="laps">Laps</label>
+            <select id="laps">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3" selected>3</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row-3">
+          <button id="startBtn" class="accent">Start Race</button>
+          <button id="restartBtn">Reset</button>
+          <button id="muteBtn">🔊 Sound</button>
+        </div>
+
+        <div class="hint">Tip: switch to <b>Chaos</b> for spicy random boosts & stumbles.</div>
+        <div class="footer">A browser remake of your Python Turtle game.</div>
+      </div>
+    </aside>
+  </div>
+
+<py-script>
+import asyncio
+from js import document, window, console
+from pyodide.ffi import create_proxy
+import random
+import math
+
+async def main():
+    try:
+        console.log("Starting turtle racing game...")
+
+        canvas = document.getElementById("race-canvas")
+        ctx = canvas.getContext("2d")
+
+        # =====================
+        # Game Configuration
+        # =====================
+        TURTLE_COLORS = ["#ff5c5c", "#ffb74d", "#ffee58", "#4dabf7", "#b388ff", "#ff6ec7"]
+        TURTLE_NAMES  = ["Lightning", "Speedy", "Thunder", "Flash", "Rocket", "Blaze"]
+
+        CANVAS_W, CANVAS_H = 1280, 720
+        LANE_H = 90
+        LEFT_MARGIN = 140
+        RIGHT_MARGIN = CANVAS_W - 160
+        START_X = LEFT_MARGIN
+        FINISH_X = RIGHT_MARGIN - 40
+
+        # =====================
+        # State
+        # =====================
+        state = {
+          "phase": "idle",
+          "countdown": 3.0,
+          "winner": None,
+          "bet": 0,
+          "mode": "fair",
+          "chaos": 0.45,
+          "laps": 3,
+          "lap_progress": [0]*6,
+          "muted": False,
+          "frame": 0,
+          "animation_id": None,
+        }
+
+        racers = []
+        confetti = []
+
+        # ============== Audio ==============
+        def ensure_audio():
+            if getattr(window, "_toneCtx", None):
+                return window._toneCtx
+            if hasattr(window, "AudioContext"):
+                window._toneCtx = window.AudioContext.new()
+                return window._toneCtx
+            return None
+
+        def play_tone(freq=880.0, when_sec=0.0, dur=0.12, vol=0.08, wave="triangle"):
+            if state["muted"]:
+                return
+            try:
+                ac = ensure_audio()
+                if not ac:
+                    return
+                now = ac.currentTime
+                o = ac.createOscillator()
+                g = ac.createGain()
+                o.type = wave
+                o.frequency.setValueAtTime(freq, now + when_sec)
+
+                # Simple ADSR-ish envelope
+                g.gain.setValueAtTime(0.0001, now + when_sec)
+                g.gain.exponentialRampToValueAtTime(vol, now + when_sec + 0.015)
+                g.gain.exponentialRampToValueAtTime(0.0001, now + when_sec + dur)
+
+                o.connect(g); g.connect(ac.destination)
+                o.start(now + when_sec)
+                o.stop(now + when_sec + dur + 0.03)
+            except Exception as e:
+                console.log(f"Audio error: {e}")
+
+        def play_sequence(seq):
+            # seq items: {t, freq, dur, vol?, wave?}
+            for n in seq:
+                play_tone(
+                    n.get("freq", 440),
+                    n.get("t", 0.0),
+                    n.get("dur", 0.12),
+                    n.get("vol", 0.06),
+                    n.get("wave", "triangle")
+                )
+
+        # ============== Utility ==============
+        def reset_race():
+            state["phase"] = "idle"
+            state["winner"] = None
+            state["lap_progress"] = [0]*6
+            racers.clear()
+            for i, (name, color) in enumerate(zip(TURTLE_NAMES, TURTLE_COLORS)):
+                y = 110 + i*LANE_H
+                racers.append({
+                    "name": name,
+                    "color": color,
+                    "x": START_X,
+                    "y": y,
+                    "base": random.uniform(1.9, 2.5),
+                    "boost": 1.0,
+                    "wiggle": random.uniform(0, 1000),
+                    "stumble": 0.0,
+                    "speed_mod": random.uniform(0.92, 1.14),
+                    "skin": random.choice(["#f8e0c9","#f1c27d","#c68642","#8d5524"]),
+                    "trail": [],
+                })
+            confetti.clear()
+
+        def start_countdown():
+            state["phase"] = "countdown"
+            state["countdown"] = 3.0
+            state["winner"] = None
+            for r in racers:
+                r["x"] = START_X
+                r["boost"] = 1.0
+                r["stumble"] = 0.0
+                r["trail"].clear()
+            confetti.clear()
+            # countdown theme
+            play_sequence([
+                {"t": 0.00, "freq": 392, "dur": 0.12, "vol": 0.05, "wave": "triangle"}, # G4
+                {"t": 0.35, "freq": 494, "dur": 0.12, "vol": 0.05, "wave": "triangle"}, # B4
+                {"t": 0.70, "freq": 587, "dur": 0.14, "vol": 0.06, "wave": "triangle"}, # D5
+                {"t": 1.05, "freq": 784, "dur": 0.26, "vol": 0.08, "wave": "sawtooth"}  # G5 (GO!)
+            ])
+
+        def trigger_confetti():
+            for _ in range(240):
+                confetti.append({
+                    "x": CANVAS_W/2 + random.uniform(-60, 60),
+                    "y": 80 + random.uniform(-16, 16),
+                    "vx": random.uniform(-2.2, 2.2),
+                    "vy": random.uniform(-5.5, -2.2),
+                    "g": random.uniform(0.09, 0.17),
+                    "size": random.uniform(3, 6),
+                    "rot": random.uniform(0, math.pi * 2),
+                    "vr": random.uniform(-0.25, 0.25),
+                    "c": [random.randint(140,255), random.randint(140,255), random.randint(140,255)]
+                })
+
+        # ============== Drawing Functions ==============
+        def draw_background():
+            # Subtle motion by shifting gradient center
+            t = state["frame"] * 0.002
+            cx = CANVAS_W/2 + math.sin(t) * 40
+
+            # Clear
+            ctx.clearRect(0, 0, CANVAS_W, CANVAS_H)
+
+            # Deep neon gradient
+            gradient = ctx.createRadialGradient(cx, 0, 0, CANVAS_W/2, CANVAS_H, 800)
+            gradient.addColorStop(0, "#0b1020")
+            gradient.addColorStop(1, "#05070d")
+            ctx.fillStyle = gradient
+            ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
+
+            # Subtle grid
+            ctx.strokeStyle = "rgba(255,255,255,0.05)"
+            ctx.lineWidth = 1
+            step = 40
+            for x in range(0, CANVAS_W, step):
+                ctx.beginPath(); ctx.moveTo(x, 60); ctx.lineTo(x, CANVAS_H-40); ctx.stroke()
+            for y in range(60, CANVAS_H-40, step):
+                ctx.beginPath(); ctx.moveTo(20, y); ctx.lineTo(CANVAS_W-20, y); ctx.stroke()
+
+            # Track lanes with glow
+            for i in range(6):
+                y = 90 + i*LANE_H
+                ctx.save()
+                ctx.shadowColor = "rgba(0,180,255,0.35)"
+                ctx.shadowBlur = 8
+                ctx.strokeStyle = "rgba(255,255,255,0.25)"
+                ctx.lineWidth = 1.5
+                ctx.beginPath(); ctx.moveTo(LEFT_MARGIN-30, y+22); ctx.lineTo(RIGHT_MARGIN+40, y+22); ctx.stroke()
+                ctx.restore()
+
+                # Dashed center line
+                ctx.strokeStyle = "rgba(255,255,255,0.55)"
+                ctx.lineWidth = 2
+                ctx.setLineDash([12, 16])
+                ctx.beginPath(); ctx.moveTo(LEFT_MARGIN, y+44); ctx.lineTo(RIGHT_MARGIN, y+44); ctx.stroke()
+                ctx.setLineDash([])
+
+            # Start post
+            ctx.lineWidth = 4
+            ctx.strokeStyle = "white"
+            ctx.beginPath(); ctx.moveTo(LEFT_MARGIN, 70); ctx.lineTo(LEFT_MARGIN, CANVAS_H-40); ctx.stroke()
+
+            # Finish post (glow)
+            ctx.save()
+            ctx.shadowColor = "#ffd740aa"
+            ctx.shadowBlur = 12
+            ctx.strokeStyle = "#ffd740"
+            ctx.beginPath(); ctx.moveTo(RIGHT_MARGIN, 70); ctx.lineTo(RIGHT_MARGIN, CANVAS_H-40); ctx.stroke()
+            ctx.restore()
+
+            # Finish tape checker pattern
+            cell = 8
+            w = 40
+            for row in range(int((CANVAS_H-120)/cell)+2):
+                for col in range(int(w/cell)+1):
+                    x = RIGHT_MARGIN - w + col*cell
+                    y = 70 + row*cell
+                    is_black = (row + col) % 2 == 0
+                    ctx.fillStyle = "#222" if is_black else "#eee"
+                    ctx.fillRect(x, y, cell, cell)
+
+            # Titles
+            ctx.fillStyle = "white"
+            ctx.font = "16px Outfit, Arial"
+            ctx.textAlign = "center"
+            ctx.fillText("START", LEFT_MARGIN-40, 56)
+            ctx.fillStyle = "#ffd740"
+            ctx.fillText("FINISH", RIGHT_MARGIN+32, 56)
+
+        def draw_racers():
+            for idx, r in enumerate(racers):
+                # Motion
+                r["wiggle"] += 0.08
+                bounce = math.sin(state["frame"]*0.12 + idx) * 1.6
+                x = r["x"]
+                y = r["y"] + bounce
+
+                # Update soft trail
+                trail = r["trail"]
+                trail.append((x, y))
+                if len(trail) > 22:
+                    trail.pop(0)
+                ctx.save()
+                for j in range(len(trail)-1, -1, -1):
+                    t = (j+1) / max(1, len(trail))
+                    ctx.globalAlpha = 0.32 * t
+                    radius = 8.0 * t
+                    ctx.fillStyle = r["color"]
+                    ctx.beginPath()
+                    ctx.arc(trail[j][0]-10, trail[j][1], max(1.5, radius*0.6), 0, 2*math.pi)
+                    ctx.fill()
+                ctx.restore()
+
+                # Avatar body (jersey capsule)
+                ctx.save()
+                ctx.shadowColor = r["color"]
+                ctx.shadowBlur = 14
+                jersey = ctx.createLinearGradient(x-24, y, x+24, y)
+                jersey.addColorStop(0, "rgba(255,255,255,0.15)")
+                jersey.addColorStop(1, r["color"])
+                ctx.fillStyle = jersey
+                ctx.beginPath()
+                ctx.ellipse(x, y+2, 26, 14, 0, 0, 2*math.pi)
+                ctx.fill()
+                # Jersey stripe
+                ctx.globalAlpha = 0.85
+                ctx.fillStyle = "rgba(255,255,255,0.35)"
+                ctx.fillRect(x-20, y-2, 40, 3)
+                ctx.restore()
+
+                # Head
+                headR = 12
+                head = ctx.createRadialGradient(x-4, y-16, 2, x, y-12, headR)
+                head.addColorStop(0, "rgba(255,255,255,0.9)")
+                head.addColorStop(1, r["skin"])
+                ctx.fillStyle = head
+                ctx.beginPath()
+                ctx.ellipse(x, y-12, headR, headR, 0, 0, 2*math.pi)
+                ctx.fill()
+
+                # Eyes
+                ctx.fillStyle = "#0b0f16"
+                ctx.beginPath(); ctx.arc(x-4, y-14, 1.7, 0, 2*math.pi); ctx.fill()
+                ctx.beginPath(); ctx.arc(x+4, y-14, 1.7, 0, 2*math.pi); ctx.fill()
+
+                # Glow accent behind
+                ctx.save()
+                glow = ctx.createRadialGradient(x-8, y, 2, x, y, 30)
+                glow.addColorStop(0, "rgba(255,255,255,0.08)")
+                glow.addColorStop(1, "rgba(255,255,255,0.0)")
+                ctx.fillStyle = glow
+                ctx.beginPath(); ctx.ellipse(x-10, y+2, 30, 18, 0, 0, 2*math.pi); ctx.fill()
+                ctx.restore()
+
+                # Nameplate
+                ctx.save()
+                ctx.shadowColor = "rgba(255,255,255,0.35)"
+                ctx.shadowBlur = 6
+                ctx.fillStyle = "white"
+                ctx.font = "12px Outfit, Arial"
+                ctx.textAlign = "center"
+                ctx.fillText(f"{idx+1}. {r['name']}", x, y+32)
+                ctx.restore()
+
+        def advance_race():
+            for i, r in enumerate(racers):
+                if state["phase"] != "racing":
+                    break
+                base = r["base"] * r["speed_mod"]
+                delta = base
+                if state["mode"] == "chaos":
+                    spice = state["chaos"]
+                    if random.random() < 0.02 * spice:
+                        r["boost"] = random.uniform(1.4, 2.2)
+                        play_tone(1200, 0, 0.06, 0.05, "triangle")
+                    if random.random() < 0.015 * spice:
+                        r["stumble"] = random.uniform(0.3, 0.7)
+                    r["boost"] = max(1.0, r["boost"] * 0.985)
+                    r["stumble"] = max(0.0, r["stumble"] * 0.97)
+                    delta *= r["boost"]
+                    delta *= (0.6 + 0.4*r["stumble"])
+                r["x"] += delta
+
+                if r["x"] >= FINISH_X:
+                    state["lap_progress"][i] += 1
+                    if state["lap_progress"][i] >= state["laps"]:
+                        state["winner"] = i
+                        state["phase"] = "finished"
+                        trigger_confetti()
+                        # Winner fanfare
+                        play_sequence([
+                            {"t":0.00, "freq":523, "dur":0.12, "vol":0.07, "wave":"triangle"}, # C5
+                            {"t":0.15, "freq":659, "dur":0.12, "vol":0.07, "wave":"triangle"}, # E5
+                            {"t":0.30, "freq":784, "dur":0.18, "vol":0.08, "wave":"sawtooth"}, # G5
+                            {"t":0.55, "freq":1046, "dur":0.28, "vol":0.09, "wave":"sawtooth"}  # C6
+                        ])
+                        break
+                    else:
+                        r["x"] = START_X + (r["x"] - FINISH_X)
+
+        def draw_ui_overlays():
+            if state["phase"] == "countdown":
+                secs = max(0.0, state["countdown"])
+                msg = "GO!" if secs < 0.5 else str(int(math.ceil(secs)))
+                ctx.save()
+                ctx.fillStyle = "rgba(10, 14, 22, 0.78)"
+                ctx.fillRect(CANVAS_W/2-140, CANVAS_H/2-60, 280, 120)
+                ctx.shadowColor = "#5de4ff"
+                ctx.shadowBlur = 16
+                ctx.fillStyle = "#5de4ff"
+                ctx.font = "64px Outfit, Arial"
+                ctx.textAlign = "center"
+                ctx.fillText(msg, CANVAS_W/2, CANVAS_H/2+20)
+                ctx.restore()
+            elif state["phase"] == "finished":
+                if state["winner"] is not None:
+                    idx = state["winner"]
+                    name = TURTLE_NAMES[idx]
+                    col = TURTLE_COLORS[idx]
+
+                    # Winner banner
+                    ctx.save()
+                    ctx.fillStyle = "rgba(0, 0, 0, 0.85)"
+                    ctx.fillRect(CANVAS_W/2-300, 24, 600, 80)
+                    ctx.shadowColor = "#ffd740"
+                    ctx.shadowBlur = 16
+                    ctx.fillStyle = "#ffd740"
+                    ctx.font = "28px Outfit, Arial"
+                    ctx.textAlign = "center"
+                    ctx.fillText(f"🏆 WINNER: {name}", CANVAS_W/2, 54)
+                    if state["bet"] == idx:
+                        ctx.fillStyle = "#49f2a1"
+                        ctx.fillText("🎉 You WON your bet!", CANVAS_W/2, 92)
+                    else:
+                        ctx.fillStyle = "#ff6b6b"
+                        ctx.fillText(f"You bet on {TURTLE_NAMES[state['bet']]}. Next time!", CANVAS_W/2, 92)
+                    ctx.restore()
+
+            # Game info
+            ctx.fillStyle = "rgba(255, 255, 255, 0.8)"
+            ctx.font = "13px Outfit, Arial"
+            ctx.textAlign = "left"
+            ctx.fillText(f"Mode: {state['mode'].title()}  •  Laps: {state['laps']}  •  Bet: {state['bet']+1}. {TURTLE_NAMES[state['bet']]}", 16, 20)
+
+        def update_confetti():
+            if not confetti:
+                return
+            for p in confetti[:]:
+                p["x"] += p["vx"]
+                p["y"] += p["vy"]
+                p["vy"] += p["g"]
+                p["rot"] += p["vr"]
+                if p["y"] > CANVAS_H + 50:
+                    confetti.remove(p)
+
+            for p in confetti:
+                ctx.save()
+                ctx.translate(p["x"], p["y"])
+                ctx.rotate(p["rot"])
+                ctx.fillStyle = f"rgb({p['c'][0]}, {p['c'][1]}, {p['c'][2]})"
+                ctx.fillRect(-p["size"]/2, -p["size"]/2, p["size"], p["size"])
+                ctx.restore()
+
+        def draw_frame():
+            state["frame"] += 1
+            draw_background()
+
+            if state["phase"] == "countdown":
+                state["countdown"] -= 1.0/60.0
+                if state["countdown"] <= 0:
+                    state["phase"] = "racing"
+                    # Subtle go blip
+                    play_tone(1046, 0.0, 0.12, 0.07, "sawtooth")
+            elif state["phase"] == "racing":
+                advance_race()
+
+            draw_racers()
+            update_confetti()
+            draw_ui_overlays()
+
+        # Animation loop
+        animate_proxy = None
+        def _animate_cb(ts=None):
+            draw_frame()
+            state["animation_id"] = window.requestAnimationFrame(animate_proxy)
+        animate_proxy = create_proxy(_animate_cb)
+
+        def animate():
+            draw_frame()
+            state["animation_id"] = window.requestAnimationFrame(animate_proxy)
+
+        # ============== DOM bindings ==============
+        def initialize_ui():
+            try:
+                bet_sel = document.getElementById("bet")
+                if bet_sel:
+                    bet_sel.innerHTML = ""
+                    for i, (n, c) in enumerate(zip(TURTLE_NAMES, TURTLE_COLORS)):
+                        opt = document.createElement("option")
+                        opt.value = str(i)
+                        opt.text = f"{i+1}. {n}"
+                        bet_sel.add(opt)
+
+                startBtn = document.getElementById("startBtn")
+                restartBtn = document.getElementById("restartBtn")
+                muteBtn = document.getElementById("muteBtn")
+                modeSel = document.getElementById("mode")
+                diffRange = document.getElementById("difficulty")
+                lapsSel = document.getElementById("laps")
+
+                def on_start(evt=None):
+                    try:
+                        state["bet"] = int(bet_sel.value)
+                        state["mode"] = str(modeSel.value)
+                        state["chaos"] = float(diffRange.value) / 100.0
+                        state["laps"] = int(lapsSel.value)
+                        start_countdown()
+                    except Exception as e:
+                        console.log(f"Start error: {e}")
+
+                def on_reset(evt=None):
+                    reset_race()
+
+                def on_mute(evt=None):
+                    state["muted"] = not state["muted"]
+                    muteBtn.innerText = "🔇 Muted" if state["muted"] else "🔊 Sound"
+
+                if startBtn:
+                    startBtn.addEventListener("click", create_proxy(on_start))
+                if restartBtn:
+                    restartBtn.addEventListener("click", create_proxy(on_reset))
+                if muteBtn:
+                    muteBtn.addEventListener("click", create_proxy(on_mute))
+
+                console.log("Event listeners attached")
+            except Exception as e:
+                console.log(f"UI initialization error: {e}")
+
+        # Initialize
+        reset_race()
+        initialize_ui()
+        animate()
+        console.log("Game initialized successfully")
+
+    except Exception as e:
+        console.log(f"Main error: {e}")
+        import traceback
+        console.log(traceback.format_exc())
+
+asyncio.ensure_future(main())
+</py-script>
+<footer id="floating-footer" class="floating-footer">
+  <!-- <span class="label">Created by</span> -->
+  <span class="badge">&lt;devbismaya/&gt;</span>
+  <span id="creditName" class="typewriter" aria-live="polite" aria-label="Bismaya Jyoti Dalei"></span>
+</footer>
+
+<script src="myScript.js"></script>
+</body>
+</html>
